@@ -1,829 +1,386 @@
 class Picacg extends ComicSource {
     name = "Picacg"
-
     key = "picacg"
-
-    version = "1.0.5"
-
+    version = "1.0.6"
     minAppVersion = "1.0.0"
-
     url = "https://cdn.jsdelivr.net/gh/venera-app/venera-configs@main/picacg.js"
-
     static defaultApiUrl = "https://picaapi.picacomic.com"
-
     apiKey = "C69BAF41DA5ABD1FFEDC6D2FEA56B";
 
+    getUuid() {
+        let uuid = this.loadData('app_uuid');
+        if (!uuid) {
+            uuid = createUuid().replace(/-/g, '');
+            this.saveData('app_uuid', uuid);
+        }
+        return uuid;
+    }
+
+    async ensureLoggedIn() {
+        if (this.isLogged) return true;
+        let account = this.loadData('account');
+        if (Array.isArray(account) && account.length >= 2) {
+            try {
+                await this.account.login(account[0], account[1]);
+                return true;
+            } catch (e) { throw '自动重连失败，请手动登录账号'; }
+        }
+        throw '请先登录哔咔账号';
+    }
+
+    async _request(method, path, body = null) {
+        const baseUrl = this.loadSetting('base_url') || Picacg.defaultApiUrl;
+        const url = `${baseUrl}/${path}`;
+        
+        const execute = async () => {
+            let headers = this.buildHeaders(method, path, this.loadData('token'));
+            if (method === 'GET') {
+                return await Network.get(url, headers);
+            } else {
+                let payload = typeof body === 'object' ? JSON.stringify(body) : body;
+                return await Network.post(url, headers, payload);
+            }
+        };
+
+        let res = await execute();
+        if (res.status === 401) {
+            await this.account.reLogin();
+            res = await execute();
+        }
+
+        if (res.status !== 200) throw `网络异常 (${res.status})`;
+
+        try {
+            let json = JSON.parse(res.body);
+            if (json.code === 200 && !json.data) throw "服务器繁忙，未返回有效数据";
+            return json;
+        } catch (e) {
+            if (typeof e === 'string') throw e;
+            throw "数据解析失败，请检查网络或分流";
+        }
+    }
+
     createSignature(path, nonce, time, method) {
-        let data = path + time + nonce + method + this.apiKey
-        let key = '~d}$Q7$eIni=V)9\\RK/P.RM4;9[7|@/CA}b~OW!3?EV`:<>M7pddUBL5n|0/*Cn'
-        let s = Convert.encodeUtf8(key)
-        let h = Convert.encodeUtf8(data.toLowerCase())
-        return Convert.hmacString(s, h, 'sha256')
+        let data = path + time + nonce + method + this.apiKey;
+        let key = '~d}$Q7$eIni=V)9\\RK/P.RM4;9[7|@/CA}b~OW!3?EV`:<>M7pddUBL5n|0/*Cn';
+        return Convert.hmacString(Convert.encodeUtf8(key), Convert.encodeUtf8(data.toLowerCase()), 'sha256');
     }
 
     buildHeaders(method, path, token) {
-        let uuid = createUuid()
-        let nonce = uuid.replace(/-/g, '')
-        let time = (new Date().getTime() / 1000).toFixed(0)
-        let signature = this.createSignature(path, nonce, time, method.toUpperCase())
+        let time = (new Date().getTime() / 1000).toFixed(0);
+        let nonce = createUuid().replace(/-/g, '');
+        let signature = this.createSignature(path, nonce, time, method.toUpperCase());
+        let baseUrl = this.loadSetting('base_url') || Picacg.defaultApiUrl;
+        let host = baseUrl.replace(/https?:\/\//, "").split('/')[0];
+
         return {
-            "api-key": "C69BAF41DA5ABD1FFEDC6D2FEA56B",
+            "api-key": this.apiKey,
             "accept": "application/vnd.picacomic.com.v1+json",
-            "app-channel": this.loadSetting('appChannel'),
+            "app-channel": this.loadSetting('appChannel') || "3",
             "authorization": token ?? "",
             "time": time,
             "nonce": nonce,
             "app-version": "2.2.1.3.3.4",
-            "app-uuid": "defaultUuid",
-            "image-quality": this.loadSetting('imageQuality'),
+            "app-uuid": this.getUuid(),
+            "image-quality": this.loadSetting('imageQuality') || "original",
             "app-platform": "android",
             "app-build-version": "45",
             "Content-Type": "application/json; charset=UTF-8",
             "user-agent": "okhttp/3.8.1",
             "version": "v1.4.1",
-            "Host": "picaapi.picacomic.com",
+            "Host": host,
             "signature": signature,
-        }
+        };
     }
 
     account = {
-        reLogin: async () => {
-            if(!this.isLogged) {
-                throw new Error('Not logged in');
-            }
-            let account = this.loadData('account')
-            if(!Array.isArray(account)) {
-                throw new Error('Failed to reLogin: Invalid account data');
-            }
-            let username = account[0]
-            let password = account[1]
-            return await this.account.login(username, password)
-        },
         login: async (account, pwd) => {
+            const baseUrl = this.loadSetting('base_url') || Picacg.defaultApiUrl;
             let res = await Network.post(
-                `${this.loadSetting('base_url')}/auth/sign-in`,
+                `${baseUrl}/auth/sign-in`,
                 this.buildHeaders('POST', 'auth/sign-in'),
-                {
-                    email: account,
-                    password: pwd
-                })
-
+                JSON.stringify({ email: account, password: pwd })
+            );
             if (res.status === 200) {
-                let json = JSON.parse(res.body)
-                if (!json.data?.token) {
-                    throw 'Failed to get token\nResponse: ' + res.body
-                }
-                this.saveData('token', json.data.token)
-                return 'ok'
+                let json = JSON.parse(res.body);
+                this.saveData('token', json.data.token);
+                this.saveData('account', [account, pwd]);
+                return 'ok';
             }
-
-            throw 'Failed to login'
+            throw '登录失败，请核对账号密码';
         },
-
+        reLogin: async () => {
+            let account = this.loadData('account');
+            if(!Array.isArray(account)) throw '未保存账号信息';
+            return await this.account.login(account[0], account[1]);
+        },
         logout: () => {
-            this.deleteData('token')
+            this.deleteData('token');
+            this.deleteData('account');
         },
-
+        info: async () => {
+            await this.ensureLoggedIn();
+            let res = await this._request('GET', 'users/profile');
+            let u = res.data.user;
+            return {
+                name: u.name,
+                avatar: u.avatar ? (u.avatar.fileServer + '/static/' + u.avatar.path) : undefined,
+                description: `Lv.${u.level} | ${u.title} | Exp: ${u.exp}`,
+            };
+        },
         registerWebsite: "https://manhuabika.com/pregister/?"
     }
 
     parseComic(comic) {
-        let tags = []
-        tags.push(...(comic.tags ?? []))
-        tags.push(...(comic.categories ?? []))
+        if (!comic || !comic._id) return null;
+        let tags = [];
+        if (Array.isArray(comic.tags)) tags.push(...comic.tags);
+        if (Array.isArray(comic.categories)) tags.push(...comic.categories);
+        
+        let coverUrl = "";
+        if (comic.thumb) {
+            let server = comic.thumb.fileServer || "https://storage-b.picacomic.com";
+            if (!server.startsWith("http")) server = "https://" + server;
+            coverUrl = server + '/static/' + comic.thumb.path;
+        }
+
         return new Comic({
             id: comic._id,
-            title: comic.title,
-            subTitle: comic.author,
-            cover: comic.thumb.fileServer + '/static/' + comic.thumb.path,
+            title: comic.title || "未知标题",
+            subTitle: comic.author || "未知作者",
+            cover: coverUrl,
             tags: tags,
-            description: `${comic.totalLikes ?? comic.likesCount} likes`,
-            maxPage: comic.pagesCount,
-        })
+            description: `${comic.totalLikes || comic.likesCount || 0} 喜欢`,
+            maxPage: comic.pagesCount || 0,
+        });
     }
 
     explore = [
         {
             title: "Picacg Random",
             type: "multiPageComicList",
-            load: async (page) => {
-                if (!this.isLogged) {
-                    throw 'Not logged in'
-                }
-                let res = await Network.get(
-                    `${this.loadSetting('base_url')}/comics/random`,
-                    this.buildHeaders('GET', 'comics/random', this.loadData('token'))
-                )
-                if(res.status === 401) {
-                    await this.account.reLogin()
-                    res = await Network.get(
-                        `${this.loadSetting('base_url')}/comics/random`,
-                        this.buildHeaders('GET', 'comics/random', this.loadData('token'))
-                    )
-                }
-                if (res.status !== 200) {
-                    throw 'Invalid status code: ' + res.status
-                }
-                let data = JSON.parse(res.body)
-                let comics = []
-                data.data.comics.forEach(c => {
-                    comics.push(this.parseComic(c))
-                })
-                return {
-                    comics: comics
-                }
+            load: async () => {
+                await this.ensureLoggedIn();
+                let res = await this._request('GET', 'comics/random');
+                return { comics: (res.data?.comics || []).map(c => this.parseComic(c)).filter(Boolean) };
             }
         },
         {
             title: "Picacg Latest",
             type: "multiPageComicList",
             load: async (page) => {
-                if (!this.isLogged) {
-                    throw 'Not logged in'
-                }
-                let res = await Network.get(
-                    `${this.loadSetting('base_url')}/comics?page=${page}&s=dd`,
-                    this.buildHeaders('GET', `comics?page=${page}&s=dd`, this.loadData('token'))
-                )
-                if(res.status === 401) {
-                    await this.account.reLogin()
-                    res = await Network.get(
-                        `${this.loadSetting('base_url')}/comics?page=${page}&s=dd`,
-                        this.buildHeaders('GET', `comics?page=${page}&s=dd`, this.loadData('token'))
-                    )
-                }
-                if (res.status !== 200) {
-                    throw 'Invalid status code: ' + res.status
-                }
-                let data = JSON.parse(res.body)
-                let comics = []
-                data.data.comics.docs.forEach(c => {
-                    comics.push(this.parseComic(c))
-                })
-                return {
-                    comics: comics
-                }
+                await this.ensureLoggedIn();
+                let res = await this._request('GET', `comics?page=${page}&s=dd`);
+                let d = res.data?.comics;
+                return { comics: (d?.docs || []).map(c => this.parseComic(c)).filter(Boolean), maxPage: d?.pages || 1 };
             }
         },
         {
             title: "Picacg H24",
             type: "multiPageComicList",
-            load: async (page) => {
-                if (!this.isLogged) {
-                    throw 'Not logged in'
-                }
-                let res = await Network.get(
-                    `${this.loadSetting('base_url')}/comics/leaderboard?tt=H24&ct=VC`,
-                    this.buildHeaders('GET', 'comics/leaderboard?tt=H24&ct=VC', this.loadData('token'))
-                )
-                if (res.status === 401) {
-                    await this.account.reLogin()
-                    res = await Network.get(
-                        `${this.loadSetting('base_url')}/comics/leaderboard?tt=H24&ct=VC`,
-                        this.buildHeaders('GET', 'comics/leaderboard?tt=H24&ct=VC', this.loadData('token'))
-                    )
-                }
-                if (res.status !== 200) {
-                    throw 'Invalid status code: ' + res.status
-                }
-                let data = JSON.parse(res.body)
-                let comics = []
-                data.data.comics.forEach(c => {
-                    comics.push(this.parseComic(c))
-                })
-                return {
-                    comics: comics
-                }
+            load: async () => {
+                await this.ensureLoggedIn();
+                let res = await this._request('GET', 'comics/leaderboard?tt=H24&ct=VC');
+                return { comics: (res.data?.comics || []).map(c => this.parseComic(c)).filter(Boolean) };
             }
         },
         {
             title: "Picacg D7",
             type: "multiPageComicList",
-            load: async (page) => {
-                if (!this.isLogged) {
-                    throw 'Not logged in'
-                }
-                let res = await Network.get(
-                    `${this.loadSetting('base_url')}/comics/leaderboard?tt=D7&ct=VC`,
-                    this.buildHeaders('GET', 'comics/leaderboard?tt=D7&ct=VC', this.loadData('token'))
-                )
-                if (res.status === 401) {
-                    await this.account.reLogin()
-                    res = await Network.get(
-                        `${this.loadSetting('base_url')}/comics/leaderboard?tt=D7&ct=VC`,
-                        this.buildHeaders('GET', 'comics/leaderboard?tt=D7&ct=VC', this.loadData('token'))
-                    )
-                }
-                if (res.status !== 200) {
-                    throw 'Invalid status code: ' + res.status
-                }
-                let data = JSON.parse(res.body)
-                let comics = []
-                data.data.comics.forEach(c => {
-                    comics.push(this.parseComic(c))
-                })
-                return {
-                    comics: comics
-                }
-            }
-        },
-        {
-            title: "Picacg D30",
-            type: "multiPageComicList",
-            load: async (page) => {
-                if (!this.isLogged) {
-                    throw 'Not logged in'
-                }
-                let res = await Network.get(
-                    `${this.loadSetting('base_url')}/comics/leaderboard?tt=D30&ct=VC`,
-                    this.buildHeaders('GET', 'comics/leaderboard?tt=D30&ct=VC', this.loadData('token'))
-                )
-                if (res.status === 401) {
-                    await this.account.reLogin()
-                    res = await Network.get(
-                        `${this.loadSetting('base_url')}/comics/leaderboard?tt=D30&ct=VC`,
-                        this.buildHeaders('GET', 'comics/leaderboard?tt=D30&ct=VC', this.loadData('token'))
-                    )
-                }
-                if (res.status !== 200) {
-                    throw 'Invalid status code: ' + res.status
-                }
-                let data = JSON.parse(res.body)
-                let comics = []
-                data.data.comics.forEach(c => {
-                    comics.push(this.parseComic(c))
-                })
-                return {
-                    comics: comics
-                }
+            load: async () => {
+                await this.ensureLoggedIn();
+                let res = await this._request('GET', 'comics/leaderboard?tt=D7&ct=VC');
+                return { comics: (res.data?.comics || []).map(c => this.parseComic(c)).filter(Boolean) };
             }
         }
     ]
 
-    /// 分类页面
-    /// 一个漫画源只能有一个分类页面, 也可以没有, 设置为null禁用分类页面
     category = {
-        /// 标题, 同时为标识符, 不能与其他漫画源的分类页面重复
         title: "Picacg",
-        parts: [
-            {
-                name: "主题",
-                type: "fixed",
-                categories: [
-                    "大家都在看",
-                    "大濕推薦",
-                    "那年今天",
-                    "官方都在看",
-                    "嗶咔漢化",
-                    "全彩",
-                    "長篇",
-                    "同人",
-                    "短篇",
-                    "圓神領域",
-                    "碧藍幻想",
-                    "CG雜圖",
-                    "英語 ENG",
-                    "生肉",
-                    "純愛",
-                    "百合花園",
-                    "耽美花園",
-                    "偽娘哲學",
-                    "後宮閃光",
-                    "扶他樂園",
-                    "單行本",
-                    "姐姐系",
-                    "妹妹系",
-                    "SM",
-                    "性轉換",
-                    "足の恋",
-                    "人妻",
-                    "NTR",
-                    "強暴",
-                    "非人類",
-                    "艦隊收藏",
-                    "Love Live",
-                    "SAO 刀劍神域",
-                    "Fate",
-                    "東方",
-                    "WEBTOON",
-                    "禁書目錄",
-                    "歐美",
-                    "Cosplay",
-                    "重口地帶"
-                ],
-                itemType: "category",
-            }
-        ],
+        parts: [{
+            name: "主题分类", type: "fixed",
+            categories: ["大家都在看", "大濕推薦", "那年今天", "官方都在看", "嗶咔漢化", "全彩", "長篇", "同人", "短篇", "純愛", "百合花園", "耽美花園", "偽娘哲學", "後宮閃光", "扶他樂園", "单行本", "姐姐系", "妹妹系", "SM", "性轉換", "足の恋", "人妻", "NTR", "強暴", "非人類", "Cosplay", "重口地帶"],
+            itemType: "category",
+        }],
         enableRankingPage: true,
     }
 
-    /// 分类漫画页面, 即点击分类标签后进入的页面
     categoryComics = {
         load: async (category, param, options, page) => {
-            let type = param ?? 'c'
-            let res = await Network.get(
-                `${this.loadSetting('base_url')}/comics?page=${page}&${type}=${encodeURIComponent(category)}&s=${options[0]}`,
-                this.buildHeaders('GET', `comics?page=${page}&${type}=${encodeURIComponent(category)}&s=${options[0]}`, this.loadData('token'))
-            )
-            if(res.status === 401) {
-                await this.account.reLogin()
-                res = await Network.get(
-                    `${this.loadSetting('base_url')}/comics?page=${page}&${type}=${encodeURIComponent(category)}&s=${options[0]}`,
-                    this.buildHeaders('GET', `comics?page=${page}&${type}=${encodeURIComponent(category)}&s=${options[0]}`, this.loadData('token'))
-                )
-            }
-            if (res.status !== 200) {
-                throw 'Invalid status code: ' + res.status
-            }
-            let data = JSON.parse(res.body)
-            let comics = []
-            data.data.comics.docs.forEach(c => {
-                comics.push(this.parseComic(c))
-            })
+            await this.ensureLoggedIn();
+            let type = param ?? 'c';
+            let res = await this._request('GET', `comics?page=${page}&${type}=${encodeURIComponent(category)}&s=${options[0]}`);
+            let d = res.data?.comics;
             return {
-                comics: comics,
-                maxPage: data.data.comics.pages
-            }
+                comics: (d?.docs || []).map(c => this.parseComic(c)).filter(Boolean),
+                maxPage: d?.pages || 1
+            };
         },
-        // 提供选项
-        optionList: [
-            {
-                options: [
-                    "dd-New to old",
-                    "da-Old to new",
-                    "ld-Most likes",
-                    "vd-Most nominated",
-                ],
-            }
-        ],
+        optionList: [{ options: ["dd-New to old", "da-Old to new", "ld-Most likes", "vd-Most nominated"] }],
         ranking: {
-            options: [
-                "H24-Day",
-                "D7-Week",
-                "D30-Month",
-            ],
-            load: async (option, page) => {
-                let res = await Network.get(
-                    `${this.loadSetting('base_url')}/comics/leaderboard?tt=${option}&ct=VC`,
-                    this.buildHeaders('GET', `comics/leaderboard?tt=${option}&ct=VC`, this.loadData('token'))
-                )
-                if(res.status === 401) {
-                    await this.account.reLogin()
-                    res = await Network.get(
-                        `${this.loadSetting('base_url')}/comics/leaderboard?tt=${option}&ct=VC`,
-                        this.buildHeaders('GET', `comics/leaderboard?tt=${option}&ct=VC`, this.loadData('token'))
-                    )
-                }
-                if (res.status !== 200) {
-                    throw 'Invalid status code: ' + res.status
-                }
-                let data = JSON.parse(res.body)
-                let comics = []
-                data.data.comics.forEach(c => {
-                    comics.push(this.parseComic(c))
-                })
-                return {
-                    comics: comics,
-                    maxPage: 1
-                }
+            options: ["H24-Day", "D7-Week", "D30-Month"],
+            load: async (option) => {
+                await this.ensureLoggedIn();
+                let res = await this._request('GET', `comics/leaderboard?tt=${option}&ct=VC`);
+                return { comics: (res.data?.comics || []).map(c => this.parseComic(c)).filter(Boolean), maxPage: 1 };
             }
         }
     }
 
-    /// 搜索
     search = {
         load: async (keyword, options, page) => {
-            let res = await Network.post(
-                `${this.loadSetting('base_url')}/comics/advanced-search?page=${page}`,
-                this.buildHeaders('POST', `comics/advanced-search?page=${page}`, this.loadData('token')),
-                JSON.stringify({
-                    keyword: keyword,
-                    sort: options[0],
-                })
-            )
-            if(res.status === 401) {
-                await this.account.reLogin()
-                res = await Network.post(
-                    `${this.loadSetting('base_url')}/comics/advanced-search?page=${page}`,
-                    this.buildHeaders('POST', `comics/advanced-search?page=${page}`, this.loadData('token')),
-                    JSON.stringify({
-                        keyword: keyword,
-                        sort: options[0],
-                    })
-                )
-            }
-            if (res.status !== 200) {
-                throw 'Invalid status code: ' + res.status
-            }
-            let data = JSON.parse(res.body)
-            let comics = []
-            data.data.comics.docs.forEach(c => {
-                comics.push(this.parseComic(c))
-            })
+            await this.ensureLoggedIn();
+            let path = `comics/advanced-search?page=${page}`;
+            let res = await this._request('POST', path, { keyword: keyword, sort: options[0] });
+            let d = res.data?.comics;
             return {
-                comics: comics,
-                maxPage: data.data.comics.pages
-            }
+                comics: (d?.docs || []).map(c => this.parseComic(c)).filter(Boolean),
+                maxPage: d?.pages || 1
+            };
         },
-        optionList: [
-            {
-                options: [
-                    "dd-New to old",
-                    "da-Old to new",
-                    "ld-Most likes",
-                    "vd-Most nominated",
-                ],
-                label: "Sort"
-            }
-        ]
-    }
-
-    /// 收藏
-    favorites = {
-        multiFolder: false,
-        /// 添加或者删除收藏
-        addOrDelFavorite: async (comicId, folderId, isAdding) => {
-            let res = await Network.post(
-                `${this.loadSetting('base_url')}/comics/${comicId}/favourite`,
-                this.buildHeaders('POST', `comics/${comicId}/favourite`, this.loadData('token')),
-                '{}'
-            )
-            if(res.status === 401) {
-                throw `Login expired`
-            }
-            if(res.status !== 200) {
-                throw 'Invalid status code: ' + res.status
-            }
-            return 'ok'
-        },
-        /// 加载漫画
-        loadComics: async (page, folder) => {
-            let sort = this.loadSetting('favoriteSort')
-            let res = await Network.get(
-                `${this.loadSetting('base_url')}/users/favourite?page=${page}&s=${sort}`,
-                this.buildHeaders('GET', `users/favourite?page=${page}&s=${sort}`, this.loadData('token'))
-            )
-            if(res.status === 401) {
-                throw `Login expired`
-            }
-            if (res.status !== 200) {
-                throw 'Invalid status code: ' + res.status
-            }
-            let data = JSON.parse(res.body)
-            let comics = []
-            data.data.comics.docs.forEach(c => {
-                comics.push(this.parseComic(c))
-            })
-            return {
-                comics: comics,
-                maxPage: data.data.comics.pages
-            }
+        optionList: [{ options: ["dd-New to old", "da-Old to new", "ld-Most likes", "vd-Most nominated"], label: "Sort" }],
+        // 新增：热门搜索词
+        hotKeywords: async () => {
+            try {
+                let res = await this._request('GET', 'keywords');
+                return res.data?.keywords || [];
+            } catch (e) { return []; }
         }
     }
 
-    /// 单个漫画相关
+    favorites = {
+        multiFolder: false,
+        addOrDelFavorite: async (comicId) => {
+            await this.ensureLoggedIn();
+            await this._request('POST', `comics/${comicId}/favourite`, '{}');
+            return 'ok';
+        },
+        loadComics: async (page) => {
+            await this.ensureLoggedIn();
+            let sort = this.loadSetting('favoriteSort') || 'dd';
+            let res = await this._request('GET', `users/favourite?page=${page}&s=${sort}`);
+            let d = res.data?.comics;
+            return { comics: (d?.docs || []).map(c => this.parseComic(c)).filter(Boolean), maxPage: d?.pages || 1 };
+        }
+    }
+
     comic = {
-        // 加载漫画信息
         loadInfo: async (id) => {
-            let infoLoader = async () => {
-                let res = await Network.get(
-                    `${this.loadSetting('base_url')}/comics/${id}`,
-                    this.buildHeaders('GET', `comics/${id}`, this.loadData('token'))
-                )
-                if (res.status !== 200) {
-                    throw 'Invalid status code: ' + res.status
-                }
-                let data = JSON.parse(res.body)
-                return data.data.comic
+            await this.ensureLoggedIn();
+            let infoRes = await this._request('GET', `comics/${id}`);
+            let info = infoRes.data?.comic;
+            if (!info) throw "漫画详情不存在";
+
+            let eps = new Map();
+            let i = 1, allEps = [];
+            while (i < 50) {
+                let epRes = await this._request('GET', `comics/${id}/eps?page=${i}`);
+                let docs = epRes.data?.eps?.docs || [];
+                allEps.push(...docs);
+                if (!epRes.data?.eps?.pages || epRes.data.eps.pages <= i) break;
+                i++;
             }
-            let epsLoader = async () => {
-                let eps = new Map();
-                let i = 1;
-                let j = 1;
-                let allEps = [];
-                while (true) {
-                    let res = await Network.get(
-                        `${this.loadSetting('base_url')}/comics/${id}/eps?page=${i}`,
-                        this.buildHeaders('GET', `comics/${id}/eps?page=${i}`, this.loadData('token'))
-                    );
-                    if (res.status !== 200) {
-                        throw 'Invalid status code: ' + res.status;
-                    }
-                    let data = JSON.parse(res.body);
-                    allEps.push(...data.data.eps.docs);
-                    if (data.data.eps.pages === i) {
-                        break;
-                    }
-                    i++;
-                }
-                allEps.sort((a, b) => a.order - b.order);
-                allEps.forEach(e => {
-                    eps.set(j.toString(), e.title);
-                    j++;
-                });
-                return eps;
-            }
-            let relatedLoader = async () => {
-                let res = await Network.get(
-                    `${this.loadSetting('base_url')}/comics/${id}/recommendation`,
-                    this.buildHeaders('GET', `comics/${id}/recommendation`, this.loadData('token'))
-                )
-                if (res.status !== 200) {
-                    throw 'Invalid status code: ' + res.status
-                }
-                let data = JSON.parse(res.body)
-                let comics = []
-                data.data.comics.forEach(c => {
-                    comics.push(this.parseComic(c))
-                })
-                return comics
-            }
-            let info, eps, related
-            try {
-                [info, eps, related] = await Promise.all([infoLoader(), epsLoader(), relatedLoader()])
-            }
-            catch (e) {
-                if (e === 'Invalid status code: 401') {
-                    await this.account.reLogin();
-                    [info, eps, related] = await Promise.all([infoLoader(), epsLoader(), relatedLoader()]);
-                }
-                throw e
-            }
-            let tags = {}
-            if(info.author) {
-                tags['Author'] = [info.author];
-            }
-            if(info.chineseTeam) {
-                tags['Chinese Team'] = [info.chineseTeam];
-            }
-            let updateTime = new Date(info.updated_at)
-            let formattedDate = updateTime.getFullYear() + '-' + (updateTime.getMonth() + 1) + '-' + updateTime.getDate()
+            allEps.sort((a, b) => a.order - b.order).forEach((e, idx) => eps.set((idx + 1).toString(), e.title));
+
+            let relatedRes = await this._request('GET', `comics/${id}/recommendation`);
+            let related = (relatedRes.data?.comics || []).map(c => this.parseComic(c)).filter(Boolean);
+
             return new ComicDetails({
                 title: info.title,
-                cover: info.thumb.fileServer + '/static/' + info.thumb.path,
+                cover: info.thumb ? (info.thumb.fileServer + '/static/' + info.thumb.path) : "",
                 description: info.description,
-                tags: {
-                    ...tags,
-                    'Categories': info.categories,
-                    'Tags': info.tags,
-                },
+                tags: { '作者': [info.author], '汉化组': [info.chineseTeam], '分类': info.categories, '标签': info.tags },
                 chapters: eps,
                 isFavorite: info.isFavourite ?? false,
                 isLiked: info.isLiked ?? false,
                 recommend: related,
-                commentCount: info.commentsCount,
-                likesCount: info.likesCount,
-                uploader: info._creator.name,
-                updateTime: formattedDate,
-                maxPage: info.pagesCount,
-            })
+                commentCount: info.commentsCount || 0,
+                likesCount: info.likesCount || 0,
+                uploader: info._creator?.name || "System",
+                updateTime: info.updated_at ? info.updated_at.split('T')[0] : "",
+                maxPage: info.pagesCount || 0,
+            });
         },
-        // 获取章节图片
         loadEp: async (comicId, epId) => {
-            let images = []
-            let i = 1
-            while(true) {
-                let res = await Network.get(
-                    `${this.loadSetting('base_url')}/comics/${comicId}/order/${epId}/pages?page=${i}`,
-                    this.buildHeaders('GET', `comics/${comicId}/order/${epId}/pages?page=${i}`, this.loadData('token'))
-                )
-                if (res.status !== 200) {
-                    throw 'Invalid status code: ' + res.status
-                }
-                let data = JSON.parse(res.body)
-                data.data.pages.docs.forEach(p => {
-                    images.push(p.media.fileServer + '/static/' + p.media.path)
-                })
-                if(data.data.pages.pages === i) {
-                    break
-                }
-                i++
+            await this.ensureLoggedIn();
+            let images = [], i = 1;
+            while(i < 100) {
+                let res = await this._request('GET', `comics/${comicId}/order/${epId}/pages?page=${i}`);
+                if (!res.data?.pages) break;
+                res.data.pages.docs.forEach(p => { if (p.media) images.push(p.media.fileServer + '/static/' + p.media.path); });
+                if(!res.data.pages.pages || res.data.pages.pages <= i) break;
+                i++;
             }
-            return {
-                images: images
-            }
+            return { images: images };
         },
-        likeComic: async (id, isLike) =>  {
-            var res = await Network.post(
-                `${this.loadSetting('base_url')}/comics/${id}/like`,
-                this.buildHeaders('POST', `comics/${id}/like`, this.loadData('token')),
-                {}
-            );
-            if (res.status !== 200) {
-                throw 'Invalid status code: ' + res.status
-            }
-            return 'ok'
-        },
-        // 加载评论
+        likeComic: async (id) => { await this._request('POST', `comics/${id}/like`, {}); return 'ok'; },
         loadComments: async (comicId, subId, page, replyTo) => {
-            function parseComment(c) {
-                return new Comment({
-                    userName: c._user.name,
-                    avatar: c._user.avatar ? c._user.avatar.fileServer + '/static/' + c._user.avatar.path : undefined,
-                    id: c._id,
-                    content: c.content,
-                    isLiked: c.isLiked,
-                    score: c.likesCount ?? 0,
-                    replyCount: c.commentsCount,
-                    time: c.created_at,
-                })
-            }
-            let comments = []
-
-            let maxPage = 1
-
-            if(replyTo) {
-                let res = await Network.get(
-                    `${this.loadSetting('base_url')}/comments/${replyTo}/childrens?page=${page}`,
-                    this.buildHeaders('GET', `comments/${replyTo}/childrens?page=${page}`, this.loadData('token'))
-                )
-                if (res.status !== 200) {
-                    throw 'Invalid status code: ' + res.status
-                }
-                let data = JSON.parse(res.body)
-                data.data.comments.docs.forEach(c => {
-                    comments.push(parseComment(c))
-                })
-                maxPage = data.data.comments.pages
-            } else {
-                let res = await Network.get(
-                    `${this.loadSetting('base_url')}/comics/${comicId}/comments?page=${page}`,
-                    this.buildHeaders('GET', `comics/${comicId}/comments?page=${page}`, this.loadData('token'))
-                )
-                if (res.status !== 200) {
-                    throw 'Invalid status code: ' + res.status
-                }
-                let data = JSON.parse(res.body)
-                data.data.comments.docs.forEach(c => {
-                    comments.push(parseComment(c))
-                })
-                maxPage = data.data.comments.pages
-            }
-            return {
-                comments: comments,
-                maxPage: maxPage
-            }
+            await this.ensureLoggedIn();
+            let path = replyTo ? `comments/${replyTo}/childrens?page=${page}` : `comics/${comicId}/comments?page=${page}`;
+            let res = await this._request('GET', path);
+            let d = res.data?.comments;
+            let comments = (d?.docs || []).map(c => new Comment({
+                userName: c._user?.name || "Unknown",
+                avatar: c._user?.avatar ? c._user.avatar.fileServer + '/static/' + c._user.avatar.path : undefined,
+                id: c._id, content: c.content, isLiked: c.isLiked, score: c.likesCount ?? 0,
+                replyCount: c.commentsCount, time: c.created_at,
+            }));
+            return { comments: comments, maxPage: d?.pages || 1 };
         },
-        // 发送评论, 返回任意值表示成功
         sendComment: async (comicId, subId, content, replyTo) => {
-            if(replyTo) {
-                let res = await Network.post(
-                    `${this.loadSetting('base_url')}/comments/${replyTo}`,
-                    this.buildHeaders('POST', `/comments/${replyTo}`, this.loadData('token')),
-                    JSON.stringify({
-                        content: content
-                    })
-                )
-                if (res.status !== 200) {
-                    throw 'Invalid status code: ' + res.status
-                }
-            } else {
-                let res = await Network.post(
-                    `${this.loadSetting('base_url')}/comics/${comicId}/comments`,
-                    this.buildHeaders('POST', `/comics/${comicId}/comments`, this.loadData('token')),
-                    JSON.stringify({
-                        content: content
-                    })
-                )
-                if (res.status !== 200) {
-                    throw 'Invalid status code: ' + res.status
-                }
-            }
-            return 'ok'
+            let path = replyTo ? `comments/${replyTo}` : `comics/${comicId}/comments`;
+            await this._request('POST', path, { content: content });
+            return 'ok';
         },
-        likeComment: async (comicId, subId, commentId, isLike) => {
-            let res = await Network.post(
-                `${this.loadSetting('base_url')}/comments/${commentId}/like`,
-                this.buildHeaders('POST', `/comments/${commentId}/like`, this.loadData('token')),
-                '{}'
-            )
-            if (res.status !== 200) {
-                throw 'Invalid status code: ' + res.status
-            }
-            return 'ok'
+        likeComment: async (comicId, subId, commentId) => {
+            await this._request('POST', `comments/${commentId}/like`, '{}');
+            return 'ok';
         },
         onClickTag: (namespace, tag) => {
-            if(namespace === 'Author') {
-                return {
-                    action: 'category',
-                    keyword: tag,
-                    param: 'a',
-                }
-            } else if (namespace === 'Categories') {
-                return {
-                    action: 'category',
-                    keyword: tag,
-                    param: 'c',
-                }
-            } else {
-                return {
-                    action: 'search',
-                    keyword: tag,
-                }
-            }
+            if(namespace === '作者') return { action: 'category', keyword: tag, param: 'a' };
+            if(namespace === '分类') return { action: 'category', keyword: tag, param: 'c' };
+            return { action: 'search', keyword: tag };
         }
     }
 
     settings = {
-        base_url: {
-            title: "API地址(地址末尾不要添加斜杠)",
-            type: "input",
-            validator: null,
-            default: Picacg.defaultApiUrl,
+        base_url: { 
+            title: "API地址", type: "input", default: Picacg.defaultApiUrl,
+            validator: (v) => v.endsWith('/') ? v.substring(0, v.length - 1) : v
         },
-        'imageQuality': {
-            type: 'select',
-            title: 'Image quality',
+        imageQuality: {
+            type: 'select', title: '图片加载质量',
             options: [
-                {
-                    value: 'original',
-                },
-                {
-                    value: 'medium'
-                },
-                {
-                    value: 'low'
-                }
+                {value: 'original', text: '原图 (画质最高，加载慢)'}, 
+                {value: 'medium', text: '中等 (推荐)'}, 
+                {value: 'low', text: '低质量 (省流量)'}
             ],
             default: 'original',
         },
-        'appChannel': {
-            type: 'select',
-            title: 'App channel',
-            options: [
-                {
-                    value: '1',
-                },
-                {
-                    value: '2'
-                },
-                {
-                    value: '3'
-                }
-            ],
+        appChannel: {
+            type: 'select', title: '服务器分流 (若列表为空请切换)',
+            options: [{value: '1', text: '分流 1'}, {value: '2', text: '分流 2'}, {value: '3', text: '分流 3 (主用)'}],
             default: '3',
         },
-        'favoriteSort': {
-            type: 'select',
-            title: 'Favorite sort',
-            options: [
-                {
-                    value: 'dd',
-                    text: 'New to old'
-                },
-                {
-                    value: 'da',
-                    text: 'Old to new'
-                },
-            ],
+        favoriteSort: {
+            type: 'select', title: '收藏夹漫画排序',
+            options: [{value: 'dd', text: '最新收藏在前'}, {value: 'da', text: '最早收藏在前'}],
             default: 'dd',
         }
     }
 
     translation = {
         'zh_CN': {
-            'Picacg Random': "哔咔随机",
-            'Picacg Latest': "哔咔最新",
-            'Picacg H24': "哔咔日榜",
-            'Picacg D7': "哔咔周榜",
-            'Picacg D30': "哔咔月榜",
-            'New to old': "新到旧",
-            'Old to new': "旧到新",
-            'Most likes': "最多喜欢",
-            'Most nominated': "最多指名",
-            'Day': "日",
-            'Week': "周",
-            'Month': "月",
-            'Author': "作者",
-            'Chinese Team': "汉化组",
-            'Categories': "分类",
-            'Tags': "标签",
-            'Image quality': "图片质量",
-            'App channel': "分流",
-            'Favorite sort': "收藏排序",
-            'Sort': "排序",
+            'Picacg Random': "哔咔随机", 'Picacg Latest': "哔咔最新", 'Picacg H24': "哔咔日榜",
+            'Picacg D7': "哔咔周榜", 'Picacg D30': "哔咔月榜", 'New to old': "新到旧",
+            'Old to new': "旧到新", 'Most likes': "最多喜欢", 'Most nominated': "最多指名",
+            'Day': "日", 'Week': "周", 'Month': "月", 'Sort': "排序"
         },
         'zh_TW': {
-            'Picacg Random': "哔咔隨機",
-            'Picacg Latest': "哔咔最新",
-            'Picacg H24': "哔咔日榜",
-            'Picacg D7': "哔咔周榜",
-            'Picacg D30': "哔咔月榜",
-            'New to old': "新到舊",
-            'Old to new': "舊到新",
-            'Most likes': "最多喜歡",
-            'Most nominated': "最多指名",
-            'Day': "日",
-            'Week': "周",
-            'Month': "月",
-            'Author': "作者",
-            'Chinese Team': "漢化組",
-            'Categories': "分類",
-            'Tags': "標籤",
-            'Image quality': "圖片質量",
-            'App channel': "分流",
-            'Favorite sort': "收藏排序",
-            'Sort': "排序",
-        },
+            'Picacg Random': "嗶咔隨機", 'Picacg Latest': "嗶咔最新", 'Picacg H24': "嗶咔日榜",
+            'Picacg D7': "嗶咔周榜", 'Picacg D30': "嗶咔月榜", 'New to old': "新到舊",
+            'Old to new': "舊到新", 'Most likes': "最多喜歡", 'Most nominated': "最多指名",
+            'Day': "日", 'Week': "周", 'Month': "月", 'Sort': "排序"
+        }
     }
-}
+            }
